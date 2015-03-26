@@ -36,27 +36,28 @@ module Poseidon
       end
     end
 
-    # Put any errors here that can result in messages persisted by one or more Kafka brokers
+    # Put any errors here that should not be retried (e.g. results in messages
+    # persisted by one or more Kafka brokers, will always fail, etc.)
     NOT_RETRYABLE = [
-      # Currently none
+      Poseidon::Errors::InvalidMessage,
+      Poseidon::Errors::InvalidMessageSize,
+      Poseidon::Errors::MessageSizeTooLarge
     ]
 
     def successfully_sent(producer_response)
       failed = []
+      abort_retry = false
       producer_response.topic_response.each do |topic_response|
         topic_response.partitions.each do |partition|
-          if NOT_RETRYABLE.include?(partition.error_class)
-            Poseidon.logger.debug { "Received #{partition.error_class} when attempting to send messages to #{topic_response.topic} on #{partition.partition}" }
-            # TODO: For not retryable errors, we should disable the retrying,
-            # yet still return an error.
-          else
+          if partition.error_class
+            abort_retry = NOT_RETRYABLE.include?(partition.error_class)
             Poseidon.logger.debug { "Received #{partition.error_class} when attempting to send messages to #{topic_response.topic} on #{partition.partition}" }
             failed.push(*@topics[topic_response.topic][partition.partition])
           end
         end
       end
 
-      return @messages - failed
+      return [@messages - failed, abort_retry]
     end
   end
 end

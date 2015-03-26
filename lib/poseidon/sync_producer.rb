@@ -39,6 +39,8 @@ module Poseidon
     def send_messages(messages)
       return if messages.empty?
 
+      stop_retrying = false
+
       messages_to_send = MessagesToSend.new(messages, @cluster_metadata)
 
       if refresh_interval_elapsed?
@@ -49,12 +51,15 @@ module Poseidon
 
       (@max_send_retries+1).times do
         messages_to_send.messages_for_brokers(@message_conductor).each do |messages_for_broker|
-          if sent = send_to_broker(messages_for_broker)
+          sent, abort_retry = send_to_broker(messages_for_broker)
+          if sent
             messages_to_send.successfully_sent(sent)
           end
+          # If sending any message raised an error that is not retriable, stop retrying
+          stop_retrying = abort_retry if abort_retry
         end
 
-        if !messages_to_send.pending_messages? || @max_send_retries == 0
+        if !messages_to_send.pending_messages? || @max_send_retries == 0 || stop_retrying
           break
         else
           Kernel.sleep retry_backoff_ms / 1000.0
@@ -99,14 +104,14 @@ module Poseidon
       @socket_timeout_ms = handle_option(options, :socket_timeout_ms)
       @retry_backoff_ms  = handle_option(options, :retry_backoff_ms)
 
-      @metadata_refresh_interval_ms = 
+      @metadata_refresh_interval_ms =
         handle_option(options, :metadata_refresh_interval_ms)
 
       @required_acks    = handle_option(options, :required_acks)
       @max_send_retries = handle_option(options, :max_send_retries)
 
       @compression_config = ProducerCompressionConfig.new(
-        handle_option(options, :compression_codec), 
+        handle_option(options, :compression_codec),
         handle_option(options, :compressed_topics))
 
       @partitioner = handle_option(options, :partitioner)
@@ -135,7 +140,7 @@ module Poseidon
     end
 
     def send_to_broker(messages_for_broker)
-      return false if messages_for_broker.broker_id == -1
+      return [false, false] if messages_for_broker.broker_id == -1
       to_send = messages_for_broker.build_protocol_objects(@compression_config)
 
       Poseidon.logger.debug { "Sending messages to broker #{messages_for_broker.broker_id}" }
@@ -143,9 +148,11 @@ module Poseidon
                                               required_acks, ack_timeout_ms,
                                               to_send)
       if required_acks == 0
-        messages_for_broker.messages
+        [messages_for_broker.messages, false]
       else
-        messages_for_broker.successfully_sent(response)
+        result, abort_retry = messages_for_broker.successfully_sent(response)
+
+        [result, abort_retry]
       end
     rescue Connection::ConnectionFailedError
       false
