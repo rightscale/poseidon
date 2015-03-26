@@ -36,14 +36,20 @@ module Poseidon
       end
     end
 
-    # We can always retry these errors because they mean none of the kafka brokers persisted the message
-    ALWAYS_RETRYABLE = [Poseidon::Errors::LeaderNotAvailable, Poseidon::Errors::NotLeaderForPartition]
+    # Put any errors here that can result in messages persisted by one or more Kafka brokers
+    NOT_RETRYABLE = [
+      # Currently none
+    ]
 
     def successfully_sent(producer_response)
       failed = []
       producer_response.topic_response.each do |topic_response|
         topic_response.partitions.each do |partition|
-          if ALWAYS_RETRYABLE.include?(partition.error_class)
+          if NOT_RETRYABLE.include?(partition.error_class)
+            Poseidon.logger.debug { "Received #{partition.error_class} when attempting to send messages to #{topic_response.topic} on #{partition.partition}" }
+            # TODO: For not retryable errors, we should disable the retrying,
+            # yet still return an error.
+          else
             Poseidon.logger.debug { "Received #{partition.error_class} when attempting to send messages to #{topic_response.topic} on #{partition.partition}" }
             failed.push(*@topics[topic_response.topic][partition.partition])
           end
